@@ -63,7 +63,7 @@ def demo_complete_workflow():
     # 1. 测试Forward Rule关联
     print_separator("1. Forward Rule关联操作")
     event = {
-        "action": "associate",
+        "action": "disassociate",
         "resolver_rule_id": FORWARD_RULE_ID,
         "vpc_id": VPC_ID,
         "region": REGION
@@ -71,12 +71,12 @@ def demo_complete_workflow():
     result = lambda_handler(event, {})
     print_result(event, result)
     
-    time.sleep(2)  # 等待AWS操作完成
+    time.sleep(120)  # 等待AWS操作完成
     
     # 2. 测试System Rule解除关联
     print_separator("2. System Rule解除关联操作")
     event = {
-        "action": "disassociate",
+        "action": "associate",
         "resolver_rule_id": SYSTEM_RULE_ID,
         "vpc_id": VPC_ID,
         "region": REGION
@@ -85,7 +85,7 @@ def demo_complete_workflow():
     print_result(event, result)
     
     time.sleep(2)  # 等待AWS操作完成
-    
+    return 
     # 3. 测试System Rule重新关联
     print_separator("3. System Rule重新关联操作")
     event = {
@@ -100,7 +100,7 @@ def demo_complete_workflow():
     # 4. 测试重复关联（应该返回already_associated）
     print_separator("4. 测试重复关联（幂等性）")
     event = {
-        "action": "associate",
+        "action": "disassociate",
         "resolver_rule_id": FORWARD_RULE_ID,
         "vpc_id": VPC_ID,
         "region": REGION

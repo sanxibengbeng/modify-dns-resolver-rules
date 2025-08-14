@@ -1,11 +1,21 @@
 import json
 import boto3
 import logging
+import time
 from botocore.exceptions import ClientError
+from botocore.config import Config
 
 # 配置日志
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+# 重试配置
+RETRY_CONFIG = Config(
+    retries={
+        'max_attempts': 3,
+        'mode': 'adaptive'
+    }
+)
 
 def lambda_handler(event, context):
     """
@@ -32,9 +42,9 @@ def lambda_handler(event, context):
         if action not in ['associate', 'disassociate']:
             raise ValueError("action必须是 'associate' 或 'disassociate'")
         
-        # 创建Route53 Resolver客户端
+        # 创建Route53 Resolver客户端（带重试配置）
         region = event.get('region', 'us-west-2')  # 默认使用us-west-2
-        resolver_client = boto3.client('route53resolver', region_name=region)
+        resolver_client = boto3.client('route53resolver', region_name=region, config=RETRY_CONFIG)
         
         logger.info(f"开始执行操作: {action}, Resolver Rule ID: {resolver_rule_id}, VPC ID: {vpc_id}")
         
@@ -90,116 +100,168 @@ def associate_resolver_rule(resolver_client, resolver_rule_id, vpc_id):
     """
     将Resolver规则与VPC关联
     """
-    try:
-        # 检查是否已经关联
-        existing_associations = resolver_client.list_resolver_rule_associations(
-            Filters=[
-                {
-                    'Name': 'ResolverRuleId',
-                    'Values': [resolver_rule_id]
-                },
-                {
-                    'Name': 'VPCId',
-                    'Values': [vpc_id]
+    max_retries = 3
+    retry_delay = 2  # 秒
+    
+    for attempt in range(max_retries):
+        try:
+            # 检查是否已经关联
+            existing_associations = resolver_client.list_resolver_rule_associations(
+                Filters=[
+                    {
+                        'Name': 'ResolverRuleId',
+                        'Values': [resolver_rule_id]
+                    },
+                    {
+                        'Name': 'VPCId',
+                        'Values': [vpc_id]
+                    }
+                ]
+            )
+            
+            if existing_associations['ResolverRuleAssociations']:
+                logger.info(f"Resolver规则 {resolver_rule_id} 已经与VPC {vpc_id} 关联")
+                return {
+                    'association_id': existing_associations['ResolverRuleAssociations'][0]['Id'],
+                    'status': 'already_associated'
                 }
-            ]
-        )
-        
-        if existing_associations['ResolverRuleAssociations']:
-            logger.info(f"Resolver规则 {resolver_rule_id} 已经与VPC {vpc_id} 关联")
+            
+            # 创建新的关联
+            response = resolver_client.associate_resolver_rule(
+                ResolverRuleId=resolver_rule_id,
+                VPCId=vpc_id
+            )
+            
+            association_id = response['ResolverRuleAssociation']['Id']
+            logger.info(f"成功创建关联: {association_id}")
+            
             return {
-                'association_id': existing_associations['ResolverRuleAssociations'][0]['Id'],
-                'status': 'already_associated'
+                'association_id': association_id,
+                'status': 'associated'
             }
+            
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+            
+            if error_code == 'ResourceExistsException':
+                logger.info(f"关联已存在: Resolver规则 {resolver_rule_id} 与VPC {vpc_id}")
+                return {
+                    'status': 'already_associated'
+                }
+            elif error_code == 'ResourceNotFoundException':
+                # 检查是否是因为规则不存在或VPC不存在
+                logger.error(f"资源未找到: Resolver规则 {resolver_rule_id} 或 VPC {vpc_id} 不存在")
+                raise
+            elif error_code == 'InvalidRequestException':
+                # 可能是System规则不能手动关联
+                logger.error(f"无效请求: 可能是System规则不能手动关联到VPC")
+                raise
+            elif error_code == 'InternalServiceErrorException':
+                # AWS内部服务错误，进行重试
+                if attempt < max_retries - 1:
+                    logger.warning(f"AWS内部服务错误 (尝试 {attempt + 1}/{max_retries}): {error_message}")
+                    logger.info(f"等待 {retry_delay} 秒后重试...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # 指数退避
+                    continue
+                else:
+                    logger.error(f"AWS内部服务错误 (最终失败): {error_message}")
+                    raise
+            elif error_code == 'LimitExceededException':
+                # 超出关联限制
+                logger.error(f"超出关联限制: {error_message}")
+                raise
+            else:
+                # 其他错误，不重试
+                logger.error(f"未知AWS API错误: {error_code} - {error_message}")
+                raise
         
-        # 创建新的关联
-        response = resolver_client.associate_resolver_rule(
-            ResolverRuleId=resolver_rule_id,
-            VPCId=vpc_id
-        )
-        
-        association_id = response['ResolverRuleAssociation']['Id']
-        logger.info(f"成功创建关联: {association_id}")
-        
-        return {
-            'association_id': association_id,
-            'status': 'associated'
-        }
-        
-    except ClientError as e:
-        error_code = e.response['Error']['Code']
-        if error_code == 'ResourceExistsException':
-            logger.info(f"关联已存在: Resolver规则 {resolver_rule_id} 与VPC {vpc_id}")
-            return {
-                'status': 'already_associated'
-            }
-        elif error_code == 'ResourceNotFoundException':
-            # 检查是否是因为规则不存在或VPC不存在
-            logger.error(f"资源未找到: Resolver规则 {resolver_rule_id} 或 VPC {vpc_id} 不存在")
+        except Exception as e:
+            # 非ClientError异常，不重试
+            logger.error(f"非AWS API错误: {str(e)}")
             raise
-        elif error_code == 'InvalidRequestException':
-            # 可能是System规则不能手动关联
-            logger.error(f"无效请求: 可能是System规则不能手动关联到VPC")
-            raise
-        elif error_code == 'InternalServiceErrorException':
-            # AWS内部服务错误，可能是临时的
-            logger.error(f"AWS内部服务错误: {e.response['Error']['Message']}")
-            raise
-        elif error_code == 'LimitExceededException':
-            # 超出关联限制
-            logger.error(f"超出关联限制: {e.response['Error']['Message']}")
-            raise
-        else:
-            raise
+    
+    # 如果所有重试都失败了，这里不应该到达
+    raise Exception("所有重试尝试都失败了")
 
 
 def disassociate_resolver_rule(resolver_client, resolver_rule_id, vpc_id):
     """
     解除Resolver规则与VPC的关联
     """
-    try:
-        # 查找现有关联
-        associations = resolver_client.list_resolver_rule_associations(
-            Filters=[
-                {
-                    'Name': 'ResolverRuleId',
-                    'Values': [resolver_rule_id]
-                },
-                {
-                    'Name': 'VPCId',
-                    'Values': [vpc_id]
+    max_retries = 3
+    retry_delay = 2  # 秒
+    
+    for attempt in range(max_retries):
+        try:
+            # 查找现有关联
+            associations = resolver_client.list_resolver_rule_associations(
+                Filters=[
+                    {
+                        'Name': 'ResolverRuleId',
+                        'Values': [resolver_rule_id]
+                    },
+                    {
+                        'Name': 'VPCId',
+                        'Values': [vpc_id]
+                    }
+                ]
+            )
+            
+            if not associations['ResolverRuleAssociations']:
+                logger.info(f"未找到Resolver规则 {resolver_rule_id} 与VPC {vpc_id} 的关联")
+                return {
+                    'status': 'not_associated'
                 }
-            ]
-        )
-        
-        if not associations['ResolverRuleAssociations']:
-            logger.info(f"未找到Resolver规则 {resolver_rule_id} 与VPC {vpc_id} 的关联")
+            
+            # 解除关联
+            association_id = associations['ResolverRuleAssociations'][0]['Id']
+            
+            response = resolver_client.disassociate_resolver_rule(
+                VPCId=vpc_id,
+                ResolverRuleId=resolver_rule_id
+            )
+            
+            logger.info(f"成功解除关联: {association_id}")
+            
             return {
-                'status': 'not_associated'
+                'association_id': association_id,
+                'status': 'disassociated'
             }
+            
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+            
+            if error_code == 'ResourceNotFoundException':
+                logger.info(f"关联不存在: Resolver规则 {resolver_rule_id} 与VPC {vpc_id}")
+                return {
+                    'status': 'not_associated'
+                }
+            elif error_code == 'InternalServiceErrorException':
+                # AWS内部服务错误，进行重试
+                if attempt < max_retries - 1:
+                    logger.warning(f"AWS内部服务错误 (尝试 {attempt + 1}/{max_retries}): {error_message}")
+                    logger.info(f"等待 {retry_delay} 秒后重试...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # 指数退避
+                    continue
+                else:
+                    logger.error(f"AWS内部服务错误 (最终失败): {error_message}")
+                    raise
+            else:
+                # 其他错误，不重试
+                logger.error(f"AWS API错误: {error_code} - {error_message}")
+                raise
         
-        # 解除关联
-        association_id = associations['ResolverRuleAssociations'][0]['Id']
-        
-        response = resolver_client.disassociate_resolver_rule(
-            VPCId=vpc_id,
-            ResolverRuleId=resolver_rule_id
-        )
-        
-        logger.info(f"成功解除关联: {association_id}")
-        
-        return {
-            'association_id': association_id,
-            'status': 'disassociated'
-        }
-        
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'ResourceNotFoundException':
-            logger.info(f"关联不存在: Resolver规则 {resolver_rule_id} 与VPC {vpc_id}")
-            return {
-                'status': 'not_associated'
-            }
-        raise
+        except Exception as e:
+            # 非ClientError异常，不重试
+            logger.error(f"非AWS API错误: {str(e)}")
+            raise
+    
+    # 如果所有重试都失败了，这里不应该到达
+    raise Exception("所有重试尝试都失败了")
 
 
 def get_resolver_rule_info(resolver_client, resolver_rule_id):
