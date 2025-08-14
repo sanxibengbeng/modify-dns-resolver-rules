@@ -8,7 +8,7 @@ from update_resolver_rule import update_resolver_rule_target_ips, lambda_handler
 
 # 配置参数
 RESOLVER_RULE_ID = "rslvr-rr-4434e3b2252648c2a"
-TARGET_IPS = ['8.8.8.8', '8.8.4.4']
+TARGET_IPS = ['8.8.8.8', '8.8.4.6']
 REGION = "us-west-2"
 
 def demo_direct_call():

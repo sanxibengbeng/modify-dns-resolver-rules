@@ -200,7 +200,7 @@ def test_locally():
     # 示例事件
     test_event = {
         'resolver_rule_id': 'rslvr-rr-xxxxxxxxx',
-        'target_ips': ['8.8.8.8', '8.8.4.4'],
+        'target_ips': ['8.8.8.8', '8.8.4.5'],
         'region': 'us-east-1'  # 可选参数
     }
     
